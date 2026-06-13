@@ -1,0 +1,566 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0">
+<title>Matrix Portal</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    background: #000;
+    overflow: hidden;
+    font-family: 'Courier New', monospace;
+    color: #00ff41;
+    width: 100vw;
+    height: 100dvh;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+  }
+  #container {
+    position: relative;
+    width: 100%;
+    height: 100dvh;
+  }
+  #video {
+    position: absolute;
+    top: 0; left: 0;
+    width: 100%; height: 100%;
+    object-fit: cover;
+    transform: scaleX(-1);
+    opacity: 0.85;
+  }
+  #canvas {
+    position: absolute;
+    top: 0; left: 0;
+    width: 100%; height: 100%;
+    transform: scaleX(-1);
+  }
+  #overlay {
+    position: absolute;
+    top: 0; left: 0;
+    width: 100%; height: 100%;
+    pointer-events: none;
+  }
+  #ui {
+    position: absolute;
+    top: 0; left: 0;
+    width: 100%;
+    padding: 12px 16px;
+    display: flex;
+    justify-content: space-between;
+    align-items: flex-start;
+    pointer-events: none;
+    z-index: 10;
+  }
+  #title {
+    font-size: 13px;
+    letter-spacing: 3px;
+    text-shadow: 0 0 10px #00ff41;
+    text-transform: uppercase;
+  }
+  #status {
+    font-size: 11px;
+    color: #00ff4199;
+    text-align: right;
+  }
+  #hint {
+    position: absolute;
+    bottom: 30px;
+    left: 50%;
+    transform: translateX(-50%);
+    text-align: center;
+    font-size: 12px;
+    color: #00ff4188;
+    letter-spacing: 2px;
+    pointer-events: none;
+    z-index: 10;
+    animation: pulse 2s ease-in-out infinite;
+    white-space: nowrap;
+  }
+  @keyframes pulse {
+    0%, 100% { opacity: 0.4; }
+    50% { opacity: 1; }
+  }
+  #loading {
+    position: absolute;
+    top: 50%; left: 50%;
+    transform: translate(-50%, -50%);
+    text-align: center;
+    z-index: 20;
+  }
+  #loading h2 {
+    font-size: 18px;
+    letter-spacing: 4px;
+    margin-bottom: 12px;
+    text-shadow: 0 0 20px #00ff41;
+  }
+  #loading p {
+    font-size: 11px;
+    color: #00ff4177;
+    letter-spacing: 2px;
+  }
+  .dot-anim::after {
+    content: '';
+    animation: dots 1.5s infinite;
+  }
+  @keyframes dots {
+    0% { content: ''; }
+    33% { content: '.'; }
+    66% { content: '..'; }
+    100% { content: '...'; }
+  }
+  #gesture-bar {
+    position: absolute;
+    bottom: 60px;
+    left: 50%;
+    transform: translateX(-50%);
+    width: 140px;
+    height: 4px;
+    background: #003300;
+    border-radius: 2px;
+    overflow: hidden;
+    z-index: 10;
+  }
+  #gesture-fill {
+    height: 100%;
+    width: 0%;
+    background: linear-gradient(90deg, #00ff41, #00ffcc);
+    border-radius: 2px;
+    transition: width 0.1s ease;
+    box-shadow: 0 0 8px #00ff41;
+  }
+</style>
+</head>
+<body>
+<div id="container">
+  <video id="video" playsinline autoplay muted></video>
+  <canvas id="canvas"></canvas>
+  <canvas id="overlay"></canvas>
+
+  <div id="ui">
+    <div id="title">⬡ MATRIX PORTAL</div>
+    <div id="status">SCANNING<span class="dot-anim"></span></div>
+  </div>
+  <div id="gesture-bar"><div id="gesture-fill"></div></div>
+  <div id="hint">OPEN YOUR PALM TO ACTIVATE</div>
+  <div id="loading">
+    <h2>INITIALIZING</h2>
+    <p class="dot-anim">LOADING HAND TRACKING</p>
+  </div>
+</div>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/gl-matrix/2.8.1/gl-matrix-min.js"></script>
+<script type="module">
+import { FilesetResolver, HandLandmarker } from "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.22-rc.20250304/+esm";
+
+const video = document.getElementById('video');
+const canvas = document.getElementById('canvas');
+const overlay = document.getElementById('overlay');
+const ctx = canvas.getContext('2d');
+const octx = overlay.getContext('2d');
+const loading = document.getElementById('loading');
+const statusEl = document.getElementById('status');
+const hintEl = document.getElementById('hint');
+const gestureFill = document.getElementById('gesture-fill');
+
+let handLandmarker = null;
+let portal = null;
+let particles = [];
+let matrixRain = [];
+let animFrame;
+let gestureLevel = 0;
+let isPortalOpen = false;
+
+// Resize
+function resize() {
+  canvas.width = overlay.width = window.innerWidth;
+  canvas.height = overlay.height = window.innerHeight;
+}
+resize();
+window.addEventListener('resize', resize);
+
+// Init hand tracking
+async function init() {
+  const vision = await FilesetResolver.forVisionTasks(
+    "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.22-rc.20250304/wasm"
+  );
+  handLandmarker = await HandLandmarker.createFromOptions(vision, {
+    baseOptions: {
+      modelAssetPath: "https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/1/hand_landmarker.task",
+      delegate: "GPU"
+    },
+    runningMode: "VIDEO",
+    numHands: 1,
+  });
+
+  const stream = await navigator.mediaDevices.getUserMedia({
+    video: { facingMode: 'user', width: { ideal: 1280 }, height: { ideal: 720 } }
+  });
+  video.srcObject = stream;
+  await new Promise(r => video.onloadedmetadata = r);
+
+  loading.style.display = 'none';
+  statusEl.innerHTML = 'HAND DETECTED <span class="dot-anim"></span>';
+  initMatrixRain();
+  render();
+}
+
+// Matrix rain
+function initMatrixRain() {
+  const cols = Math.floor(canvas.width / 18);
+  matrixRain = Array.from({ length: cols }, (_, i) => ({
+    x: i * 18,
+    y: Math.random() * canvas.height,
+    speed: 0.5 + Math.random() * 1.5,
+    chars: Array.from({ length: 20 }, () => randomChar()),
+    opacity: 0.03 + Math.random() * 0.05
+  }));
+}
+
+function randomChar() {
+  const chars = 'アイウエオカキクケコサシスセソタチツテトナニヌネノハヒフヘホ01アカサ';
+  return chars[Math.floor(Math.random() * chars.length)];
+}
+
+// Portal class
+class Portal {
+  constructor(cx, cy, rx, ry) {
+    this.cx = cx; this.cy = cy;
+    this.rx = rx; this.ry = ry;
+    this.birth = Date.now();
+    this.age = 0;
+    this.open = 0; // 0-1
+    this.innerRotation = 0;
+    this.rings = Array.from({ length: 5 }, (_, i) => ({
+      r: (i + 1) / 5,
+      speed: (i % 2 === 0 ? 1 : -1) * (0.5 + i * 0.3),
+      angle: Math.random() * Math.PI * 2
+    }));
+    this.spawn = true;
+  }
+
+  update(cx, cy, rx, ry) {
+    this.cx += (cx - this.cx) * 0.2;
+    this.cy += (cy - this.cy) * 0.2;
+    this.rx += (rx - this.rx) * 0.15;
+    this.ry += (ry - this.ry) * 0.15;
+    this.open = Math.min(1, this.open + 0.06);
+    this.age++;
+    this.innerRotation += 0.02;
+    this.rings.forEach(r => r.angle += r.speed * 0.02);
+  }
+
+  draw(ctx) {
+    const { cx, cy, rx, ry, open } = this;
+    const scaledRx = rx * open;
+    const scaledRy = ry * open;
+
+    ctx.save();
+    ctx.translate(cx, cy);
+
+    // Outer glow
+    for (let g = 4; g >= 0; g--) {
+      const glow = ctx.createRadialGradient(0, 0, scaledRx * 0.3, 0, 0, scaledRx * (1.2 + g * 0.3));
+      glow.addColorStop(0, `rgba(0,255,65,${0.0 + g * 0.01})`);
+      glow.addColorStop(1, 'rgba(0,0,0,0)');
+      ctx.fillStyle = glow;
+      ctx.beginPath();
+      ctx.ellipse(0, 0, scaledRx * (1.5 + g * 0.4), scaledRy * (1.5 + g * 0.4), 0, 0, Math.PI * 2);
+      ctx.fill();
+    }
+
+    // Portal interior — dark swirling void
+    ctx.save();
+    ctx.beginPath();
+    ctx.ellipse(0, 0, scaledRx, scaledRy, 0, 0, Math.PI * 2);
+    ctx.clip();
+
+    // Deep void
+    const void_ = ctx.createRadialGradient(0, 0, 0, 0, 0, Math.max(scaledRx, scaledRy));
+    void_.addColorStop(0, '#000820');
+    void_.addColorStop(0.5, '#001408');
+    void_.addColorStop(1, '#000500');
+    ctx.fillStyle = void_;
+    ctx.fillRect(-scaledRx, -scaledRy, scaledRx * 2, scaledRy * 2);
+
+    // Swirling inner rings
+    ctx.save();
+    ctx.rotate(this.innerRotation);
+    for (let i = 0; i < 12; i++) {
+      const t = (i / 12) * Math.PI * 2;
+      const x = Math.cos(t) * scaledRx * 0.5;
+      const y = Math.sin(t) * scaledRy * 0.5;
+      ctx.fillStyle = `rgba(0,255,65,${0.1 + Math.sin(t + this.innerRotation * 3) * 0.05})`;
+      ctx.beginPath();
+      ctx.arc(x, y, 2, 0, Math.PI * 2);
+      ctx.fill();
+    }
+    ctx.restore();
+
+    // Inner spiral lines
+    ctx.strokeStyle = 'rgba(0,255,100,0.15)';
+    ctx.lineWidth = 1;
+    for (let sp = 0; sp < 3; sp++) {
+      ctx.beginPath();
+      for (let t = 0; t < Math.PI * 8; t += 0.05) {
+        const frac = t / (Math.PI * 8);
+        const r = frac * 0.9;
+        const a = t + this.innerRotation * (1 + sp) + sp * Math.PI * 0.66;
+        ctx.lineTo(Math.cos(a) * r * scaledRx, Math.sin(a) * r * scaledRy);
+      }
+      ctx.stroke();
+    }
+
+    // Matrix chars inside portal
+    ctx.font = `${Math.floor(scaledRx * 0.07)}px 'Courier New'`;
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    for (let ch = 0; ch < 12; ch++) {
+      const angle = (ch / 12) * Math.PI * 2 + this.innerRotation * 1.5;
+      const rad = scaledRx * (0.2 + (ch % 3) * 0.22);
+      const x = Math.cos(angle) * rad;
+      const y = Math.sin(angle) * rad * (scaledRy / scaledRx);
+      const alpha = 0.3 + Math.abs(Math.sin(this.age * 0.05 + ch)) * 0.4;
+      ctx.fillStyle = `rgba(0,255,65,${alpha})`;
+      ctx.fillText(randomChar(), x, y);
+    }
+
+    ctx.restore(); // unclip
+
+    // Orbital rings
+    this.rings.forEach((ring, i) => {
+      const rRx = scaledRx * (0.9 + i * 0.08);
+      const rRy = scaledRy * (0.9 + i * 0.08);
+      const alpha = 0.3 + i * 0.1;
+      const width = 1 + i * 0.3;
+
+      ctx.save();
+      ctx.rotate(ring.angle);
+      ctx.beginPath();
+      ctx.ellipse(0, 0, rRx, rRy, 0, 0, Math.PI * 2);
+      ctx.strokeStyle = `rgba(0,255,65,${alpha * open})`;
+      ctx.lineWidth = width;
+      ctx.setLineDash([rRx * 0.3, rRx * 0.1]);
+      ctx.stroke();
+      ctx.setLineDash([]);
+      ctx.restore();
+    });
+
+    // Edge glow rim
+    const rim = ctx.createRadialGradient(0, 0, scaledRx * 0.85, 0, 0, scaledRx * 1.05);
+    rim.addColorStop(0, 'rgba(0,255,65,0)');
+    rim.addColorStop(0.5, `rgba(0,255,65,${0.6 * open})`);
+    rim.addColorStop(1, 'rgba(0,255,65,0)');
+    ctx.beginPath();
+    ctx.ellipse(0, 0, scaledRx * 1.05, scaledRy * 1.05, 0, 0, Math.PI * 2);
+    ctx.strokeStyle = rim;
+    ctx.lineWidth = scaledRx * 0.15;
+    ctx.stroke();
+
+    ctx.restore();
+  }
+}
+
+// Particles
+class Particle {
+  constructor(cx, cy, rx) {
+    const angle = Math.random() * Math.PI * 2;
+    const r = rx * (0.9 + Math.random() * 0.3);
+    this.x = cx + Math.cos(angle) * r;
+    this.y = cy + Math.sin(angle) * r * 0.6;
+    this.vx = (Math.random() - 0.5) * 3;
+    this.vy = -Math.random() * 4 - 1;
+    this.life = 1;
+    this.decay = 0.015 + Math.random() * 0.02;
+    this.size = 1 + Math.random() * 3;
+    this.char = randomChar();
+  }
+  update() {
+    this.x += this.vx;
+    this.y += this.vy;
+    this.vy += 0.05;
+    this.life -= this.decay;
+  }
+  draw(ctx) {
+    ctx.globalAlpha = this.life;
+    ctx.fillStyle = `rgba(0,255,65,${this.life})`;
+    ctx.font = `${this.size * 6}px 'Courier New'`;
+    ctx.fillText(this.char, this.x, this.y);
+    ctx.globalAlpha = 1;
+  }
+}
+
+// Measure hand openness
+function measureHandOpenness(landmarks) {
+  // Palm center (wrist)
+  const wrist = landmarks[0];
+  // Fingertips: 4,8,12,16,20
+  // MCPs (knuckles): 5,9,13,17
+  const tips = [4, 8, 12, 16, 20];
+  const mcps = [2, 5, 9, 13, 17];
+
+  let totalExtension = 0;
+  for (let i = 0; i < 5; i++) {
+    const tip = landmarks[tips[i]];
+    const mcp = landmarks[mcps[i]];
+    // Distance from wrist to tip vs wrist to mcp
+    const tipDist = Math.hypot(tip.x - wrist.x, tip.y - wrist.y);
+    const mcpDist = Math.hypot(mcp.x - wrist.x, mcp.y - wrist.y);
+    totalExtension += tipDist / (mcpDist + 0.001);
+  }
+  return totalExtension / 5; // avg > ~1.6 = open hand
+}
+
+function getPalmCenter(landmarks) {
+  const pts = [0, 5, 9, 13, 17];
+  let x = 0, y = 0;
+  pts.forEach(i => { x += landmarks[i].x; y += landmarks[i].y; });
+  return { x: x / pts.length, y: y / pts.length };
+}
+
+function getPalmRadius(landmarks) {
+  const palm = getPalmCenter(landmarks);
+  const pts = [5, 9, 13, 17];
+  let total = 0;
+  pts.forEach(i => {
+    total += Math.hypot(landmarks[i].x - palm.x, landmarks[i].y - palm.y);
+  });
+  return (total / pts.length) * 2.5;
+}
+
+function render() {
+  animFrame = requestAnimationFrame(render);
+  const W = canvas.width, H = canvas.height;
+
+  // Clear
+  ctx.clearRect(0, 0, W, H);
+  octx.clearRect(0, 0, W, H);
+
+  // Matrix rain (very subtle ambient)
+  octx.font = '14px Courier New';
+  matrixRain.forEach(col => {
+    col.y += col.speed;
+    if (col.y > H) col.y = -200;
+    col.chars.forEach((ch, i) => {
+      const y = col.y - i * 18;
+      if (y > 0 && y < H) {
+        octx.fillStyle = `rgba(0,255,65,${col.opacity * (1 - i / 20)})`;
+        octx.fillText(ch, col.x, y);
+      }
+    });
+    if (Math.random() < 0.01) col.chars[Math.floor(Math.random() * col.chars.length)] = randomChar();
+  });
+
+  // Hand tracking
+  let detected = false;
+  if (handLandmarker && video.readyState >= 2) {
+    const result = handLandmarker.detectForVideo(video, performance.now());
+
+    if (result.landmarks && result.landmarks.length > 0) {
+      detected = true;
+      const landmarks = result.landmarks[0];
+      const openness = measureHandOpenness(landmarks);
+      const palm = getPalmCenter(landmarks);
+      const palmR = getPalmRadius(landmarks);
+
+      // Map to canvas (video is mirrored)
+      const cx = (1 - palm.x) * W;
+      const cy = palm.y * H;
+      const rx = palmR * W * 1.4;
+      const ry = rx * 0.65;
+
+      // Gesture level
+      const threshold = 1.6;
+      const maxOpen = 2.5;
+      const raw = Math.max(0, Math.min(1, (openness - threshold) / (maxOpen - threshold)));
+      gestureLevel += (raw - gestureLevel) * 0.12;
+      gestureFill.style.width = (gestureLevel * 100) + '%';
+
+      if (gestureLevel > 0.3) {
+        isPortalOpen = true;
+        if (!portal) {
+          portal = new Portal(cx, cy, rx * gestureLevel, ry * gestureLevel);
+          hintEl.style.opacity = '0';
+        }
+        portal.update(cx, cy, rx * gestureLevel * 1.2, ry * gestureLevel * 1.2);
+
+        // Spawn particles
+        if (Math.random() < gestureLevel * 0.4) {
+          particles.push(new Particle(cx, cy, rx * gestureLevel));
+        }
+
+        // Draw
+        portal.draw(ctx);
+        statusEl.innerHTML = '⬡ PORTAL OPEN';
+      } else {
+        if (gestureLevel < 0.05 && portal) {
+          portal = null;
+          isPortalOpen = false;
+          hintEl.style.opacity = '1';
+          statusEl.innerHTML = 'HAND DETECTED';
+        } else if (portal) {
+          // Fade out
+          portal.open = Math.max(0, portal.open - 0.08);
+          if (portal.open <= 0) {
+            portal = null;
+          } else {
+            portal.draw(ctx);
+          }
+        }
+      }
+
+      // Draw hand skeleton (subtle)
+      drawHand(ctx, landmarks, W, H, gestureLevel);
+    } else {
+      gestureLevel *= 0.9;
+      gestureFill.style.width = '0%';
+      hintEl.style.opacity = '1';
+      statusEl.innerHTML = 'SCANNING';
+      if (portal) {
+        portal.open = Math.max(0, portal.open - 0.05);
+        if (portal.open <= 0) portal = null;
+        else portal.draw(ctx);
+      }
+    }
+  }
+
+  // Particles
+  particles = particles.filter(p => p.life > 0);
+  particles.forEach(p => { p.update(); p.draw(ctx); });
+}
+
+function drawHand(ctx, landmarks, W, H, g) {
+  const connections = [
+    [0,1],[1,2],[2,3],[3,4],
+    [0,5],[5,6],[6,7],[7,8],
+    [0,9],[9,10],[10,11],[11,12],
+    [0,13],[13,14],[14,15],[15,16],
+    [0,17],[17,18],[18,19],[19,20],
+    [5,9],[9,13],[13,17]
+  ];
+  const alpha = Math.max(0.08, 0.3 - g * 0.25);
+  ctx.strokeStyle = `rgba(0,255,65,${alpha})`;
+  ctx.lineWidth = 1;
+  connections.forEach(([a, b]) => {
+    const la = landmarks[a], lb = landmarks[b];
+    ctx.beginPath();
+    ctx.moveTo((1 - la.x) * W, la.y * H);
+    ctx.lineTo((1 - lb.x) * W, lb.y * H);
+    ctx.stroke();
+  });
+  landmarks.forEach(lm => {
+    ctx.beginPath();
+    ctx.arc((1 - lm.x) * W, lm.y * H, 2, 0, Math.PI * 2);
+    ctx.fillStyle = `rgba(0,255,65,${alpha * 1.5})`;
+    ctx.fill();
+  });
+}
+
+init().catch(err => {
+  loading.innerHTML = `<h2>ERROR</h2><p>${err.message}</p><p style="margin-top:10px;font-size:10px">Allow camera access and try again</p>`;
+});
+</script>
+</body>
+</html>
