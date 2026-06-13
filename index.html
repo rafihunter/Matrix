@@ -1,0 +1,749 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+<title>Portal</title>
+<style>
+*{margin:0;padding:0;box-sizing:border-box;}
+body{background:#000;overflow:hidden;width:100vw;height:100dvh;}
+#wrap{position:relative;width:100%;height:100dvh;}
+#video{position:absolute;top:0;left:0;width:100%;height:100%;object-fit:cover;transform:scaleX(-1);}
+#cv{position:absolute;top:0;left:0;width:100%;height:100%;pointer-events:none;}
+#info{position:absolute;bottom:30px;left:50%;transform:translateX(-50%);color:rgba(255,255,255,0.5);font:12px/1.6 monospace;letter-spacing:2px;text-align:center;pointer-events:none;transition:opacity 0.5s;}
+#load{position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);color:#a78bfa;font:14px monospace;letter-spacing:3px;text-align:center;z-index:20;}
+</style>
+</head>
+<body>
+<div id="wrap">
+  <video id="video" playsinline autoplay muted></video>
+  <canvas id="cv"></canvas>
+  <div id="info">PINCH THUMB &amp; INDEX FINGER — BOTH HANDS</div>
+  <div id="load">⬡ LOADING...</div>
+</div>
+<script type="module">
+import { FilesetResolver, HandLandmarker } from "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.22-rc.20250304/+esm";
+
+const video = document.getElementById('video');
+const cv = document.getElementById('cv');
+const ctx = cv.getContext('2d');
+const info = document.getElementById('info');
+const load = document.getElementById('load');
+
+let W, H, handLandmarker, frame = 0;
+let portal = null;
+let alienHand = null;
+let sparks = [];
+let tears = [];
+
+function resize(){
+  W = cv.width = window.innerWidth;
+  H = cv.height = window.innerHeight;
+}
+resize();
+window.addEventListener('resize', resize);
+
+// ---- PORTAL (shape defined by thumb+index of both hands) ----
+class Portal {
+  constructor(p1, p2){
+    // p1 = thumb of hand0, p2 = index of hand1 (or vice versa)
+    this.p1 = {...p1};
+    this.p2 = {...p2};
+    this.tp1 = {...p1};
+    this.tp2 = {...p2};
+    this.open = 0;
+    this.age = 0;
+    this.innerAngle = 0;
+    this.rimPulse = 0;
+    this.shards = Array.from({length:20},()=>({
+      angle: Math.random()*Math.PI*2,
+      dist: 0.9+Math.random()*0.3,
+      size: 3+Math.random()*8,
+      speed: (Math.random()-0.5)*0.02,
+      life: Math.random()
+    }));
+    this.cracks = this.genCracks();
+  }
+
+  genCracks(){
+    const arr=[];
+    for(let i=0;i<8;i++){
+      const a=Math.random()*Math.PI*2;
+      const len=0.3+Math.random()*0.5;
+      const segs=[];
+      let cx=0,cy=0,ca=a;
+      for(let s=0;s<5;s++){
+        const d=(len/5)*(0.8+Math.random()*0.4);
+        ca+=( Math.random()-0.5)*0.6;
+        cx+=Math.cos(ca)*d;
+        cy+=Math.sin(ca)*d;
+        segs.push({x:cx,y:cy});
+      }
+      arr.push({segs,alpha:0.3+Math.random()*0.4});
+    }
+    return arr;
+  }
+
+  update(p1,p2){
+    this.tp1=p1; this.tp2=p2;
+    this.p1.x+=(p1.x-this.p1.x)*0.25;
+    this.p1.y+=(p1.y-this.p1.y)*0.25;
+    this.p2.x+=(p2.x-this.p2.x)*0.25;
+    this.p2.y+=(p2.y-this.p2.y)*0.25;
+    this.open=Math.min(1,this.open+0.05);
+    this.age++;
+    this.innerAngle+=0.018;
+    this.rimPulse=(Math.sin(frame*0.07)*0.5+0.5);
+    this.shards.forEach(s=>{s.angle+=s.speed;s.life=(Math.sin(frame*0.04+s.angle)*0.5+0.5);});
+  }
+
+  // Portal is an ellipse between p1 and p2
+  getEllipse(){
+    const cx=(this.p1.x+this.p2.x)/2;
+    const cy=(this.p1.y+this.p2.y)/2;
+    const dx=this.p2.x-this.p1.x;
+    const dy=this.p2.y-this.p1.y;
+    const rx=Math.hypot(dx,dy)/2;
+    const ry=rx*0.55;
+    const angle=Math.atan2(dy,dx);
+    return {cx,cy,rx,ry,angle};
+  }
+
+  draw(){
+    const {cx,cy,rx,ry,angle}=this.getEllipse();
+    const sc=this.open;
+    const srx=rx*sc, sry=ry*sc;
+    if(srx<8) return;
+
+    ctx.save();
+    ctx.translate(cx,cy);
+    ctx.rotate(angle);
+
+    // === REALITY TEAR / CRACK EFFECT ===
+    // Dark space-time distortion around rim
+    for(let g=6;g>=0;g--){
+      const ex=srx*(1+g*0.06), ey=sry*(1+g*0.06);
+      const alpha=(0.12-g*0.015)*sc;
+      ctx.beginPath();
+      ctx.ellipse(0,0,ex,ey,0,0,Math.PI*2);
+      ctx.fillStyle=`rgba(0,0,0,${alpha})`;
+      ctx.fill();
+    }
+
+    // === PORTAL INTERIOR ===
+    ctx.save();
+    ctx.beginPath();
+    ctx.ellipse(0,0,srx,sry,0,0,Math.PI*2);
+    ctx.clip();
+
+    // Deep cosmic void
+    const bg=ctx.createRadialGradient(0,0,0,0,0,srx);
+    bg.addColorStop(0,'#03001a');
+    bg.addColorStop(0.3,'#080028');
+    bg.addColorStop(0.7,'#020010');
+    bg.addColorStop(1,'#000005');
+    ctx.fillStyle=bg;
+    ctx.fillRect(-srx,-sry,srx*2,sry*2);
+
+    // Nebula layers
+    ctx.save();
+    ctx.rotate(this.innerAngle*0.3);
+    for(let n=0;n<5;n++){
+      const na=(n/5)*Math.PI*2+this.innerAngle*0.1;
+      const nx=Math.cos(na)*srx*0.3, ny=Math.sin(na)*sry*0.3;
+      const nr=srx*(0.4+n*0.08);
+      const ng=ctx.createRadialGradient(nx,ny,0,nx,ny,nr);
+      const hues=['#1a0050','#0d0040','#200060','#100055','#0a0035'];
+      ng.addColorStop(0,hues[n]+'cc');
+      ng.addColorStop(0.5,hues[n]+'44');
+      ng.addColorStop(1,'transparent');
+      ctx.fillStyle=ng;
+      ctx.beginPath();
+      ctx.ellipse(nx,ny,nr,nr*0.6,0,0,Math.PI*2);
+      ctx.fill();
+    }
+    ctx.restore();
+
+    // Warp spiral
+    ctx.save();
+    ctx.rotate(this.innerAngle);
+    for(let sp=0;sp<4;sp++){
+      ctx.beginPath();
+      for(let t=0;t<=Math.PI*6;t+=0.03){
+        const frac=t/(Math.PI*6);
+        const r=frac*srx*0.95;
+        const a=t+sp*Math.PI/2;
+        const px=Math.cos(a)*r, py=Math.sin(a)*r*(sry/srx);
+        t===0?ctx.moveTo(px,py):ctx.lineTo(px,py);
+      }
+      const hue=260+sp*25;
+      ctx.strokeStyle=`hsla(${hue},100%,60%,0.06)`;
+      ctx.lineWidth=1;
+      ctx.stroke();
+    }
+    ctx.restore();
+
+    // Stars
+    for(let s=0;s<60;s++){
+      const sa=(s*2.39996+this.innerAngle*0.05)%(Math.PI*2);
+      const sr=Math.sqrt(s/60)*srx*0.92;
+      const sx=Math.cos(sa)*sr, sy=Math.sin(sa)*sr*(sry/srx);
+      const bright=0.3+Math.sin(frame*0.05+s*0.7)*0.3;
+      ctx.beginPath();
+      ctx.arc(sx,sy,0.7+bright,0,Math.PI*2);
+      ctx.fillStyle=`rgba(${180+s%75},${160+s%90},255,${bright})`;
+      ctx.fill();
+    }
+
+    // Energy core pulse
+    const core=ctx.createRadialGradient(0,0,0,0,0,srx*0.35);
+    core.addColorStop(0,`rgba(140,80,255,${0.08+this.rimPulse*0.1})`);
+    core.addColorStop(1,'transparent');
+    ctx.fillStyle=core;
+    ctx.fillRect(-srx,-sry,srx*2,sry*2);
+
+    ctx.restore(); // unclip
+
+    // === RIM — photorealistic energy edge ===
+    // Multi-layer glow
+    const rimColors=[
+      [80,20,200,0.06],[100,40,220,0.1],[140,60,255,0.2],
+      [180,100,255,0.5],[220,160,255,0.9],[255,220,255,1]
+    ];
+    rimColors.forEach(([r,g,b,a],i)=>{
+      const ex=srx*(1+i*0.012), ey=sry*(1+i*0.012);
+      ctx.beginPath();
+      ctx.ellipse(0,0,ex,ey,0,0,Math.PI*2);
+      ctx.strokeStyle=`rgba(${r},${g},${b},${a*sc})`;
+      ctx.lineWidth=12-i*1.5;
+      ctx.stroke();
+    });
+
+    // Bright core rim
+    ctx.beginPath();
+    ctx.ellipse(0,0,srx,sry,0,0,Math.PI*2);
+    ctx.strokeStyle=`rgba(240,210,255,${0.9*sc})`;
+    ctx.lineWidth=2;
+    ctx.stroke();
+
+    // Hot white rim highlight
+    ctx.beginPath();
+    ctx.ellipse(0,0,srx*0.99,sry*0.99,0,0,Math.PI*2);
+    ctx.strokeStyle=`rgba(255,255,255,${0.4*sc*(0.7+this.rimPulse*0.3)})`;
+    ctx.lineWidth=1;
+    ctx.stroke();
+
+    // === REALITY CRACKS emanating from rim ===
+    this.cracks.forEach(crack=>{
+      ctx.save();
+      ctx.rotate(crack.segs[0]?Math.atan2(crack.segs[0].y,crack.segs[0].x):0);
+      ctx.beginPath();
+      // Start at rim edge
+      const startA=Math.random()*Math.PI*2;
+      ctx.moveTo(Math.cos(startA)*srx, Math.sin(startA)*sry);
+      crack.segs.forEach(seg=>{
+        ctx.lineTo(Math.cos(startA)*srx+seg.x*srx*0.4, Math.sin(startA)*sry+seg.y*sry*0.4);
+      });
+      ctx.strokeStyle=`rgba(180,120,255,${crack.alpha*sc*0.6})`;
+      ctx.lineWidth=0.8;
+      ctx.stroke();
+      ctx.restore();
+    });
+
+    // Rotating energy shards on rim
+    this.shards.forEach(sh=>{
+      const sx2=Math.cos(sh.angle)*srx*sh.dist;
+      const sy2=Math.sin(sh.angle)*sry*sh.dist;
+      ctx.save();
+      ctx.translate(sx2,sy2);
+      ctx.rotate(sh.angle+frame*0.02);
+      ctx.fillStyle=`rgba(200,150,255,${sh.life*0.7*sc})`;
+      ctx.fillRect(-sh.size/2,-sh.size/6,sh.size,sh.size/3);
+      ctx.restore();
+    });
+
+    // Lightning bolts on rim
+    for(let l=0;l<4;l++){
+      if(Math.random()>0.25) continue;
+      const a1=(l/4)*Math.PI*2+frame*0.01;
+      const a2=a1+(Math.random()-0.5)*1.2;
+      const lx1=Math.cos(a1)*srx, ly1=Math.sin(a1)*sry;
+      const lx2=Math.cos(a2)*srx*0.5, ly2=Math.sin(a2)*sry*0.5;
+      drawLightning(lx1,ly1,lx2,ly2,`rgba(220,180,255,${0.5+Math.random()*0.4})`);
+    }
+
+    // === FINGER MARKERS — glowing pinch points ===
+    [
+      {x:-(srx), y:0},
+      {x:(srx), y:0}
+    ].forEach(pt=>{
+      const fg=ctx.createRadialGradient(pt.x,pt.y,0,pt.x,pt.y,30);
+      fg.addColorStop(0,`rgba(255,220,255,${0.8*sc})`);
+      fg.addColorStop(0.5,`rgba(180,80,255,${0.4*sc})`);
+      fg.addColorStop(1,'transparent');
+      ctx.fillStyle=fg;
+      ctx.beginPath();
+      ctx.arc(pt.x,pt.y,30,0,Math.PI*2);
+      ctx.fill();
+      ctx.beginPath();
+      ctx.arc(pt.x,pt.y,5,0,Math.PI*2);
+      ctx.fillStyle=`rgba(255,255,255,${0.9*sc})`;
+      ctx.fill();
+    });
+
+    ctx.restore();
+  }
+}
+
+function drawLightning(x1,y1,x2,y2,color){
+  ctx.beginPath();
+  ctx.moveTo(x1,y1);
+  let cx=x1,cy=y1;
+  const segs=5;
+  for(let i=1;i<=segs;i++){
+    const t=i/segs;
+    const tx=x1+(x2-x1)*t+(Math.random()-0.5)*25;
+    const ty=y1+(y2-y1)*t+(Math.random()-0.5)*12;
+    ctx.lineTo(tx,ty);
+  }
+  ctx.strokeStyle=color;
+  ctx.lineWidth=1.2;
+  ctx.shadowColor=color;
+  ctx.shadowBlur=6;
+  ctx.stroke();
+  ctx.shadowBlur=0;
+}
+
+// ---- REALISTIC ALIEN HAND ----
+class AlienHand {
+  constructor(portalCx, portalCy, portalRx, portalAngle){
+    this.cx=portalCx; this.cy=portalCy;
+    this.rx=portalRx; this.angle=portalAngle;
+    this.emerge=0;
+    this.alive=true;
+    this.phase=Math.random()*Math.PI*2;
+    this.fingerPhases=Array.from({length:5},()=>Math.random()*Math.PI*2);
+    this.scale=1;
+    this.retract=false;
+  }
+
+  update(cx,cy,rx,angle){
+    this.cx+=(cx-this.cx)*0.1;
+    this.cy+=(cy-this.cy)*0.1;
+    this.rx+=(rx-this.rx)*0.1;
+    this.angle+=(angle-this.angle)*0.1;
+    if(!this.retract) this.emerge=Math.min(1,this.emerge+0.012);
+    else { this.emerge=Math.max(0,this.emerge-0.025); if(this.emerge<=0) this.alive=false; }
+    this.phase+=0.03;
+    this.fingerPhases.forEach((p,i)=>{this.fingerPhases[i]+=0.02+i*0.005;});
+  }
+
+  draw(){
+    if(this.emerge<=0) return;
+    const {cx,cy,rx,angle,emerge}=this;
+    const s=rx*0.9*emerge;
+
+    ctx.save();
+    ctx.translate(cx,cy);
+    ctx.rotate(angle+Math.PI/2);
+
+    // Clip to portal ellipse so hand appears from inside
+    ctx.save();
+    ctx.beginPath();
+    ctx.ellipse(0,0,rx*1.02,rx*0.55*1.02,0,0,Math.PI*2);
+    // We draw ABOVE the clip, so hand emerges through:
+    ctx.restore();
+
+    // === ALIEN HAND — photorealistic style ===
+    // Uses layered gradients to mimic 3D skin/tissue
+
+    const armLen=s*2.5;
+    // Wrist/arm coming through portal
+    const armGrad=ctx.createLinearGradient(0,0,0,armLen);
+    armGrad.addColorStop(0,'#1a3d1a');   // darker at portal entry
+    armGrad.addColorStop(0.3,'#2a6b2a');
+    armGrad.addColorStop(0.7,'#1f5c1f');
+    armGrad.addColorStop(1,'rgba(20,60,20,0)');
+
+    // Arm shape
+    ctx.beginPath();
+    ctx.moveTo(-s*0.22, s*0.1);
+    ctx.bezierCurveTo(-s*0.28,s*0.5,-s*0.3,armLen*0.6,-s*0.22,armLen);
+    ctx.lineTo(s*0.22,armLen);
+    ctx.bezierCurveTo(s*0.3,armLen*0.6,s*0.28,s*0.5,s*0.22,s*0.1);
+    ctx.closePath();
+    ctx.fillStyle=armGrad;
+    ctx.fill();
+
+    // Arm muscle highlights
+    const armHL=ctx.createLinearGradient(-s*0.15,s*0.3,s*0.05,s*0.3);
+    armHL.addColorStop(0,'transparent');
+    armHL.addColorStop(0.4,'rgba(80,180,80,0.15)');
+    armHL.addColorStop(1,'transparent');
+    ctx.fillStyle=armHL;
+    ctx.fill();
+
+    // Arm veins
+    ctx.strokeStyle='rgba(0,80,0,0.4)';
+    ctx.lineWidth=1.5;
+    for(let v=0;v<3;v++){
+      ctx.beginPath();
+      const vx=(v-1)*s*0.08;
+      ctx.moveTo(vx,s*0.3);
+      ctx.bezierCurveTo(vx+s*0.03,s*0.8,vx-s*0.02,s*1.2,vx+s*0.01,armLen*0.7);
+      ctx.stroke();
+    }
+
+    // === PALM ===
+    ctx.save();
+    ctx.translate(0, 0);
+
+    // Palm base
+    const palmGrad=ctx.createRadialGradient(-s*0.05,-s*0.1,0,0,s*0.15,s*0.6);
+    palmGrad.addColorStop(0,'#3a8a3a');
+    palmGrad.addColorStop(0.4,'#2a6a2a');
+    palmGrad.addColorStop(0.8,'#1e521e');
+    palmGrad.addColorStop(1,'#163d16');
+
+    ctx.beginPath();
+    ctx.moveTo(-s*0.28, s*0.15);
+    ctx.bezierCurveTo(-s*0.35,-s*0.05,-s*0.3,-s*0.4,-s*0.1,-s*0.52);
+    ctx.bezierCurveTo(s*0.05,-s*0.6,s*0.2,-s*0.58,s*0.3,-s*0.45);
+    ctx.bezierCurveTo(s*0.42,-s*0.3,s*0.38,s*0.0,s*0.28,s*0.15);
+    ctx.bezierCurveTo(s*0.2,s*0.25,s*0.1,s*0.3,0,s*0.3);
+    ctx.bezierCurveTo(-s*0.12,s*0.3,-s*0.22,s*0.25,-s*0.28,s*0.15);
+    ctx.closePath();
+    ctx.fillStyle=palmGrad;
+    ctx.fill();
+
+    // Palm skin lines (life lines)
+    ctx.strokeStyle='rgba(0,60,0,0.3)';
+    ctx.lineWidth=1;
+    ctx.beginPath();
+    ctx.moveTo(-s*0.25,s*0.1);
+    ctx.bezierCurveTo(-s*0.1,s*0.05,s*0.05,-s*0.1,s*0.22,-s*0.05);
+    ctx.stroke();
+    ctx.beginPath();
+    ctx.moveTo(-s*0.2,s*0.05);
+    ctx.bezierCurveTo(s*0.0,-s*0.15,s*0.2,-s*0.2,s*0.28,-s*0.1);
+    ctx.stroke();
+
+    // Palm highlight (wet/shiny skin)
+    const palmHL=ctx.createRadialGradient(-s*0.08,-s*0.05,0,-s*0.08,-s*0.05,s*0.3);
+    palmHL.addColorStop(0,'rgba(120,220,120,0.18)');
+    palmHL.addColorStop(0.5,'rgba(80,180,80,0.06)');
+    palmHL.addColorStop(1,'transparent');
+    ctx.fillStyle=palmHL;
+    ctx.beginPath();
+    ctx.ellipse(-s*0.08,-s*0.05,s*0.3,s*0.22,0,0,Math.PI*2);
+    ctx.fill();
+
+    // === FINGERS ===
+    const fingers=[
+      {ox:-s*0.22,oy:-s*0.5,angle:-0.25,len:s*0.62,w:s*0.085,name:'index'},
+      {ox:-s*0.06,oy:-s*0.58,angle:-0.05,len:s*0.72,w:s*0.092,name:'middle'},
+      {ox:s*0.1,oy:-s*0.56,angle:0.08,len:s*0.68,w:s*0.087,name:'ring'},
+      {ox:s*0.24,oy:-s*0.46,angle:0.22,len:s*0.52,w:s*0.075,name:'pinky'},
+    ];
+
+    fingers.forEach((f,fi)=>{
+      const wave=Math.sin(this.fingerPhases[fi])*s*0.03;
+      ctx.save();
+      ctx.translate(f.ox+wave*0.5, f.oy);
+      ctx.rotate(f.angle);
+
+      // 3 segments
+      for(let seg=0;seg<3;seg++){
+        const segLen=f.len/3;
+        const sy=seg*segLen;
+        const curl=Math.sin(this.phase+fi*0.5)*0.04*(seg+1);
+
+        ctx.save();
+        ctx.translate(0,sy);
+        ctx.rotate(curl);
+
+        // Segment body
+        const segGrad=ctx.createLinearGradient(-f.w*0.5,0,f.w*0.5,0);
+        segGrad.addColorStop(0,'#1e5c1e');
+        segGrad.addColorStop(0.3,'#3a8a3a');
+        segGrad.addColorStop(0.6,'#2e7a2e');
+        segGrad.addColorStop(1,'#163d16');
+
+        ctx.beginPath();
+        ctx.roundRect(-f.w*(0.5-seg*0.03),0,f.w*(1-seg*0.06),segLen*0.92,f.w*0.2);
+        ctx.fillStyle=segGrad;
+        ctx.fill();
+
+        // Knuckle highlight
+        if(seg>0){
+          ctx.beginPath();
+          ctx.ellipse(0,0,f.w*0.4,f.w*0.18,0,0,Math.PI*2);
+          ctx.fillStyle='rgba(60,120,60,0.4)';
+          ctx.fill();
+          // Knuckle lines
+          ctx.strokeStyle='rgba(0,50,0,0.3)';
+          ctx.lineWidth=0.7;
+          [-1,0,1].forEach(kl=>{
+            ctx.beginPath();
+            ctx.moveTo(kl*f.w*0.2,-f.w*0.08);
+            ctx.lineTo(kl*f.w*0.15,f.w*0.08);
+            ctx.stroke();
+          });
+        }
+
+        // Segment edge highlight
+        ctx.beginPath();
+        ctx.moveTo(-f.w*0.35,f.w*0.1);
+        ctx.lineTo(-f.w*0.3,segLen*0.85);
+        ctx.strokeStyle='rgba(80,180,80,0.2)';
+        ctx.lineWidth=1.5;
+        ctx.stroke();
+
+        ctx.restore();
+      }
+
+      // Fingertip / claw
+      ctx.save();
+      ctx.translate(0,f.len);
+      // Tip
+      const tipGrad=ctx.createRadialGradient(0,0,0,0,f.w*0.3,f.w*0.5);
+      tipGrad.addColorStop(0,'#2a7a2a');
+      tipGrad.addColorStop(1,'#0d3d0d');
+      ctx.beginPath();
+      ctx.ellipse(0,f.w*0.15,f.w*0.4,f.w*0.35,0,0,Math.PI*2);
+      ctx.fillStyle=tipGrad;
+      ctx.fill();
+      // Claw/nail — dark sharp
+      ctx.beginPath();
+      ctx.moveTo(-f.w*0.2,f.w*0.0);
+      ctx.bezierCurveTo(-f.w*0.15,-f.w*0.4,f.w*0.15,-f.w*0.4,f.w*0.2,f.w*0.0);
+      ctx.bezierCurveTo(f.w*0.1,f.w*0.2,-f.w*0.1,f.w*0.2,-f.w*0.2,f.w*0.0);
+      ctx.fillStyle='#0a250a';
+      ctx.fill();
+      ctx.strokeStyle='rgba(60,160,60,0.5)';
+      ctx.lineWidth=0.8;
+      ctx.stroke();
+      // Claw shine
+      ctx.beginPath();
+      ctx.moveTo(-f.w*0.08,-f.w*0.25);
+      ctx.lineTo(0,-f.w*0.32);
+      ctx.strokeStyle='rgba(150,255,150,0.3)';
+      ctx.lineWidth=1;
+      ctx.stroke();
+      ctx.restore();
+
+      ctx.restore();
+    });
+
+    // Thumb
+    ctx.save();
+    ctx.translate(-s*0.32,s*0.05);
+    ctx.rotate(-0.9+Math.sin(this.fingerPhases[4])*0.04);
+    const thumbLen=s*0.42;
+    const thumbW=s*0.1;
+    for(let seg=0;seg<2;seg++){
+      const sy=seg*thumbLen*0.5;
+      const tg=ctx.createLinearGradient(-thumbW*0.5,0,thumbW*0.5,0);
+      tg.addColorStop(0,'#1e5c1e');
+      tg.addColorStop(0.35,'#3a8a3a');
+      tg.addColorStop(1,'#163d16');
+      ctx.beginPath();
+      ctx.roundRect(-thumbW*(0.5-seg*0.04),sy,thumbW*(1-seg*0.08),thumbLen*0.46,thumbW*0.2);
+      ctx.fillStyle=tg;
+      ctx.fill();
+      if(seg>0){
+        ctx.beginPath();
+        ctx.ellipse(0,sy,thumbW*0.4,thumbW*0.18,0,0,Math.PI*2);
+        ctx.fillStyle='rgba(60,120,60,0.35)';
+        ctx.fill();
+      }
+    }
+    // Thumb tip
+    ctx.translate(0,thumbLen);
+    const ttg=ctx.createRadialGradient(0,0,0,0,thumbW*0.3,thumbW*0.5);
+    ttg.addColorStop(0,'#2a7a2a');
+    ttg.addColorStop(1,'#0d3d0d');
+    ctx.beginPath();
+    ctx.ellipse(0,thumbW*0.1,thumbW*0.42,thumbW*0.36,0,0,Math.PI*2);
+    ctx.fillStyle=ttg;
+    ctx.fill();
+    ctx.beginPath();
+    ctx.moveTo(-thumbW*0.2,0);
+    ctx.bezierCurveTo(-thumbW*0.15,-thumbW*0.35,thumbW*0.15,-thumbW*0.35,thumbW*0.2,0);
+    ctx.bezierCurveTo(thumbW*0.1,thumbW*0.2,-thumbW*0.1,thumbW*0.2,-thumbW*0.2,0);
+    ctx.fillStyle='#0a250a';
+    ctx.fill();
+    ctx.restore();
+
+    ctx.restore(); // palm
+
+    // === SUBSURFACE SCATTERING — skin glow ===
+    const sss=ctx.createRadialGradient(0,-s*0.1,0,0,0,s*0.7);
+    sss.addColorStop(0,'rgba(80,255,80,0.06)');
+    sss.addColorStop(0.5,'rgba(40,180,40,0.02)');
+    sss.addColorStop(1,'transparent');
+    ctx.fillStyle=sss;
+    ctx.beginPath();
+    ctx.ellipse(0,0,s*0.7,s*0.8,0,0,Math.PI*2);
+    ctx.fill();
+
+    // Portal light falling on hand
+    const pLight=ctx.createRadialGradient(0,0,0,0,0,s*0.5);
+    pLight.addColorStop(0,'rgba(180,120,255,0.12)');
+    pLight.addColorStop(1,'transparent');
+    ctx.fillStyle=pLight;
+    ctx.beginPath();
+    ctx.ellipse(0,s*0.1,s*0.5,s*0.6,0,0,Math.PI*2);
+    ctx.fill();
+
+    ctx.restore();
+  }
+}
+
+// ---- SPARKS ----
+class Spark {
+  constructor(x,y){
+    this.x=x;this.y=y;
+    const a=Math.random()*Math.PI*2;
+    const sp=2+Math.random()*5;
+    this.vx=Math.cos(a)*sp;this.vy=Math.sin(a)*sp;
+    this.life=1;this.size=1+Math.random()*2;
+    this.color=`hsl(${270+Math.random()*60},100%,${70+Math.random()*30}%)`;
+  }
+  update(){this.x+=this.vx;this.y+=this.vy;this.vx*=0.94;this.vy*=0.94;this.life-=0.025;}
+  draw(){
+    ctx.globalAlpha=this.life;
+    ctx.fillStyle=this.color;
+    ctx.shadowColor=this.color;
+    ctx.shadowBlur=4;
+    ctx.beginPath();
+    ctx.arc(this.x,this.y,this.size,0,Math.PI*2);
+    ctx.fill();
+    ctx.shadowBlur=0;
+    ctx.globalAlpha=1;
+  }
+}
+
+// ---- HAND UTILS ----
+function lmPt(lm,i){
+  return {x:(1-lm[i].x)*W, y:lm[i].y*H};
+}
+
+// ---- INIT ----
+async function init(){
+  const vision=await FilesetResolver.forVisionTasks(
+    "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.22-rc.20250304/wasm"
+  );
+  handLandmarker=await HandLandmarker.createFromOptions(vision,{
+    baseOptions:{
+      modelAssetPath:"https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/1/hand_landmarker.task",
+      delegate:"GPU"
+    },
+    runningMode:"VIDEO",
+    numHands:2
+  });
+  const stream=await navigator.mediaDevices.getUserMedia({
+    video:{facingMode:'user',width:{ideal:1280},height:{ideal:720}}
+  });
+  video.srcObject=stream;
+  await new Promise(r=>video.onloadedmetadata=r);
+  load.style.display='none';
+  render();
+}
+
+let portalOpenFrames=0;
+
+function render(){
+  requestAnimationFrame(render);
+  frame++;
+  ctx.clearRect(0,0,W,H);
+
+  if(!handLandmarker||video.readyState<2) return;
+
+  const result=handLandmarker.detectForVideo(video,performance.now());
+  const lms=result.landmarks||[];
+
+  if(lms.length>=2){
+    // Use thumb tip (4) of one hand and index tip (8) of other — or both thumbs
+    // Best: use index fingertip of each hand as the two "portal anchors"
+    const pt0=lmPt(lms[0],8); // index tip hand0
+    const pt1=lmPt(lms[1],8); // index tip hand1
+
+    // Also get thumbs
+    const th0=lmPt(lms[0],4);
+    const th1=lmPt(lms[1],4);
+
+    // Portal defined between the two index fingers
+    if(!portal){
+      portal=new Portal(pt0,pt1);
+      portalOpenFrames=0;
+    } else {
+      portal.update(pt0,pt1);
+      portalOpenFrames++;
+    }
+
+    // Spawn alien hand after portal is well open
+    const {cx,cy,rx,ry,angle}=portal.getEllipse();
+    if(portalOpenFrames>40 && !alienHand && portal.open>0.6){
+      alienHand=new AlienHand(cx,cy,rx,angle);
+    }
+    if(alienHand){
+      alienHand.update(cx,cy,rx,angle);
+      if(!alienHand.alive) alienHand=null;
+    }
+
+    // Sparks from rim
+    if(Math.random()<0.35){
+      const a=Math.random()*Math.PI*2;
+      sparks.push(new Spark(
+        cx+Math.cos(a)*rx*portal.open,
+        cy+Math.sin(a)*ry*portal.open
+      ));
+    }
+
+    // Draw
+    if(alienHand) alienHand.draw();
+    portal.draw();
+
+    // Draw hand skeleton subtle
+    lms.forEach(lm=>{
+      [[0,1],[1,2],[2,3],[3,4],[0,5],[5,6],[6,7],[7,8],[5,9],[9,10],[10,11],[11,12],[9,13],[13,14],[14,15],[15,16],[13,17],[17,18],[18,19],[19,20],[0,17]].forEach(([a,b])=>{
+        const pa=lmPt(lm,a),pb=lmPt(lm,b);
+        ctx.beginPath();ctx.moveTo(pa.x,pa.y);ctx.lineTo(pb.x,pb.y);
+        ctx.strokeStyle='rgba(180,120,255,0.15)';ctx.lineWidth=1;ctx.stroke();
+      });
+      [4,8].forEach(i=>{
+        const p=lmPt(lm,i);
+        const g=ctx.createRadialGradient(p.x,p.y,0,p.x,p.y,18);
+        g.addColorStop(0,'rgba(255,200,255,0.7)');
+        g.addColorStop(1,'transparent');
+        ctx.fillStyle=g;ctx.beginPath();ctx.arc(p.x,p.y,18,0,Math.PI*2);ctx.fill();
+      });
+    });
+
+    info.style.opacity='0';
+  } else {
+    // Fade portal out
+    if(portal){
+      portal.closing=true;
+      const {cx,cy,rx,ry,angle}=portal.getEllipse();
+      portal.update({x:portal.p1.x,y:portal.p1.y},{x:portal.p2.x,y:portal.p2.y});
+      portal.open=Math.max(0,portal.open-0.05);
+      if(portal.open<=0){portal=null;alienHand=null;portalOpenFrames=0;}
+      else portal.draw();
+    }
+    if(alienHand){alienHand.retract=true;}
+    info.style.opacity='1';
+    info.textContent=lms.length===1?'SHOW BOTH HANDS — USE INDEX FINGERS':'PINCH THUMB & INDEX — BOTH HANDS';
+  }
+
+  sparks.forEach(s=>{s.update();s.draw();});
+  sparks=sparks.filter(s=>s.life>0);
+}
+
+init().catch(e=>{
+  load.innerHTML=`<div style="color:#f44">ERROR</div><p style="font-size:11px;margin-top:6px">${e.message}</p><p style="font-size:10px;margin-top:4px;color:#888">Allow camera & reload</p>`;
+});
+</script>
+</body>
+</html>
